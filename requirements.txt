@@ -7,7 +7,7 @@
 psutil>=5.8.0
 
 # Optional dependencies for real LLM providers
-openai>=1.0.0
+openai>=1.0.0  # Required for OpenAI and DeepSeek providers
 # anthropic>=0.7.0
 # requests>=2.25.0
 

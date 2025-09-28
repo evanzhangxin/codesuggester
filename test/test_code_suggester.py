@@ -18,7 +18,7 @@ from io import StringIO
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from code_suggester import (
-    ASTAnalyzer, LLMProvider, MockLLMProvider, CodeSuggester, 
+    ASTAnalyzer, LLMProvider, MockLLMProvider, DeepSeekProvider, CodeSuggester, 
     CodeContext, main
 )
 
@@ -159,6 +159,102 @@ class TestLLMProvider(unittest.TestCase):
         # Test general completion
         result = provider.generate_completion("some other code")
         self.assertIn("TODO", result)
+    
+    def test_deepseek_provider_without_api_key(self):
+        """Test DeepSeek provider initialization without API key."""
+        with self.assertRaises(ValueError) as context:
+            DeepSeekProvider()
+        self.assertIn("DeepSeek API key is required", str(context.exception))
+    
+    @patch('openai.OpenAI')
+    def test_deepseek_provider_with_api_key(self, mock_openai):
+        """Test DeepSeek provider initialization with API key."""
+        # Mock the OpenAI client
+        mock_client = Mock()
+        mock_openai.return_value = mock_client
+        
+        provider = DeepSeekProvider(api_key="test_key")
+        
+        # Verify initialization
+        self.assertEqual(provider.api_key, "test_key")
+        self.assertEqual(provider.model, "deepseek-coder")
+        self.assertEqual(provider.base_url, "https://api.deepseek.com")
+        
+        # Verify OpenAI client was initialized with correct parameters
+        mock_openai.assert_called_once_with(
+            api_key="test_key",
+            base_url="https://api.deepseek.com"
+        )
+    
+    @patch('openai.OpenAI')
+    def test_deepseek_provider_generate_completion(self, mock_openai):
+        """Test DeepSeek provider completion generation."""
+        # Mock the OpenAI client and response
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.choices = [Mock()]
+        mock_response.choices[0].message.content = "    return value"
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_openai.return_value = mock_client
+        
+        provider = DeepSeekProvider(api_key="test_key")
+        result = provider.generate_completion("def test_function():")
+        
+        # Verify the result
+        self.assertEqual(result, "return value")
+        
+        # Verify the API call
+        mock_client.chat.completions.create.assert_called_once()
+        call_args = mock_client.chat.completions.create.call_args
+        
+        # Check the parameters passed to the API
+        self.assertEqual(call_args.kwargs['model'], 'deepseek-coder')
+        self.assertEqual(call_args.kwargs['temperature'], 0.3)
+        self.assertEqual(call_args.kwargs['timeout'], 10.0)
+        self.assertIn('messages', call_args.kwargs)
+    
+    @patch('openai.OpenAI')
+    def test_deepseek_provider_with_custom_model(self, mock_openai):
+        """Test DeepSeek provider with custom model."""
+        mock_client = Mock()
+        mock_openai.return_value = mock_client
+        
+        provider = DeepSeekProvider(api_key="test_key", model="deepseek-chat")
+        
+        self.assertEqual(provider.model, "deepseek-chat")
+    
+    @patch('openai.OpenAI')
+    def test_deepseek_provider_api_error_handling(self, mock_openai):
+        """Test DeepSeek provider error handling."""
+        import openai
+        
+        # Mock the OpenAI client to raise different types of errors
+        mock_client = Mock()
+        mock_openai.return_value = mock_client
+        
+        provider = DeepSeekProvider(api_key="test_key")
+        
+        # Test generic error (since exact OpenAI exception structure may vary)
+        mock_client.chat.completions.create.side_effect = Exception("Authentication failed")
+        result = provider.generate_completion("test prompt")
+        self.assertIn("DeepSeek Error:", result)
+        
+        # Test timeout error
+        mock_client.chat.completions.create.side_effect = Exception("Request timeout occurred")
+        result = provider.generate_completion("test prompt")
+        self.assertIn("DeepSeek Error: Request timeout", result)
+        
+        # Test general exception handling
+        mock_client.chat.completions.create.side_effect = Exception("Some other error")
+        result = provider.generate_completion("test prompt")
+        self.assertIn("DeepSeek Error:", result)
+    
+    def test_deepseek_provider_import_error(self):
+        """Test DeepSeek provider with missing openai dependency."""
+        with patch('builtins.__import__', side_effect=ImportError("No module named 'openai'")):
+            with self.assertRaises(ImportError) as context:
+                DeepSeekProvider(api_key="test_key")
+            self.assertIn("OpenAI library not installed", str(context.exception))
 
 
 class TestCodeSuggester(unittest.TestCase):
@@ -336,6 +432,57 @@ class TestMainFunction(unittest.TestCase):
                 main()
                 output = mock_stdout.getvalue()
                 self.assertIn('Suggestion:', output)
+            except SystemExit:
+                pass
+    
+    @patch('sys.stdout', new_callable=StringIO)
+    @patch('code_suggester.DeepSeekProvider')
+    def test_main_with_deepseek_provider(self, mock_deepseek_provider, mock_stdout):
+        """Test main function with DeepSeek provider."""
+        # Mock the DeepSeek provider
+        mock_provider_instance = Mock()
+        mock_provider_instance.generate_completion.return_value = "    pass"
+        mock_deepseek_provider.return_value = mock_provider_instance
+        
+        test_args = [
+            'code_suggester.py', 
+            self.temp_file.name, 
+            '1', 
+            '0',
+            '--provider', 'deepseek',
+            '--api-key', 'test_key',
+            '--output-format', 'text'
+        ]
+        
+        with patch('sys.argv', test_args):
+            try:
+                main()
+                output = mock_stdout.getvalue()
+                self.assertIn('Suggestion:', output)
+                # Verify DeepSeek provider was called
+                mock_deepseek_provider.assert_called_once_with(api_key='test_key')
+            except SystemExit:
+                pass
+    
+    @patch('sys.stdout', new_callable=StringIO)
+    @patch('builtins.print')
+    def test_main_deepseek_fallback_to_mock(self, mock_print, mock_stdout):
+        """Test main function falls back to mock when DeepSeek provider fails."""
+        test_args = [
+            'code_suggester.py', 
+            self.temp_file.name, 
+            '1', 
+            '0',
+            '--provider', 'deepseek'
+            # No API key provided
+        ]
+        
+        with patch('sys.argv', test_args):
+            try:
+                main()
+                # Should print error message about DeepSeek provider
+                mock_print.assert_any_call("Error initializing DeepSeek provider: DeepSeek API key is required. Set it via --api-key argument or DEEPSEEK_API_KEY environment variable.")
+                mock_print.assert_any_call("Falling back to mock provider")
             except SystemExit:
                 pass
 

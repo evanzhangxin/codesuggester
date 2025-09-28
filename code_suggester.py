@@ -312,6 +312,84 @@ Completion:"""
             return f"\n    # Error with Anthropic API: {str(e)[:50]}..."
 
 
+class DeepSeekProvider(LLMProvider):
+    """DeepSeek API provider for code completion."""
+    
+    def __init__(self, api_key: Optional[str] = None, model: str = "deepseek-coder", base_url: str = "https://api.deepseek.com"):
+        super().__init__(api_key)
+        self.model = model
+        self.base_url = base_url
+        
+        if not api_key:
+            raise ValueError(
+                "DeepSeek API key is required. Set it via --api-key argument or DEEPSEEK_API_KEY environment variable."
+            )
+        
+        # Import OpenAI client (DeepSeek uses OpenAI-compatible API)
+        try:
+            import openai
+            self.client = openai.OpenAI(
+                api_key=api_key,
+                base_url=base_url
+            )
+        except ImportError:
+            raise ImportError(
+                "OpenAI library not installed. Install with: pip install openai>=1.0.0"
+            )
+    
+    def generate_completion(self, prompt: str, max_tokens: int = 150) -> str:
+        """Generate code completion using DeepSeek API."""
+        try:
+            # Create a focused prompt for code completion
+            completion_prompt = f"""You are a Python code completion assistant. Based on the code context below, provide ONLY the code that should complete the current line or add the next logical code.
+
+Do not include explanations, comments, or full rewrites. Just provide the minimal completion.
+
+Code context:
+{prompt}
+
+Completion:"""
+            
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user", 
+                        "content": completion_prompt
+                    }
+                ],
+                max_tokens=max_tokens,
+                temperature=0.3,  # Lower temperature for more deterministic code
+                timeout=10.0,  # 10 second timeout
+                stop=["\n\n", "```"]  # Stop at double newlines or code blocks
+            )
+            
+            completion = response.choices[0].message.content
+            
+            # Clean up the completion
+            if completion:
+                # Remove any markdown code blocks
+                completion = completion.replace("```python", "").replace("```", "")
+                # Strip leading/trailing whitespace but preserve internal formatting
+                completion = completion.strip()
+                
+            return completion or "\n    # TODO: Implement this"
+            
+        except Exception as e:
+            # More specific error handling
+            import openai
+            if isinstance(e, openai.AuthenticationError):
+                return f"\n    # DeepSeek Error: Invalid API key"
+            elif isinstance(e, openai.RateLimitError):
+                return f"\n    # DeepSeek Error: Rate limit exceeded"
+            elif isinstance(e, openai.APIConnectionError):
+                return f"\n    # DeepSeek Error: Network connection failed"
+            elif "timeout" in str(e).lower():
+                return f"\n    # DeepSeek Error: Request timeout (>10s)"
+            else:
+                return f"\n    # DeepSeek Error: {str(e)[:50]}..."
+
+
 class CodeSuggester:
     """Main class for providing code suggestions."""
     
@@ -426,7 +504,7 @@ def main():
                        help='Context window length (default: 8096)')
     parser.add_argument('--api-key', help='API key for LLM provider')
     parser.add_argument('--provider', default='mock', 
-                       choices=['mock', 'openai', 'anthropic'],
+                       choices=['mock', 'openai', 'anthropic', 'deepseek'],
                        help='LLM provider to use (default: mock)')
     parser.add_argument('--output-format', default='text', 
                        choices=['text', 'json'],
@@ -453,6 +531,15 @@ def main():
             llm_provider = AnthropicProvider(api_key=api_key)
         except (ImportError, ValueError) as e:
             print(f"Error initializing Anthropic provider: {e}")
+            print("Falling back to mock provider")
+            llm_provider = MockLLMProvider()
+    elif args.provider == 'deepseek':
+        # Get API key from argument or environment variable
+        api_key = args.api_key or os.getenv('DEEPSEEK_API_KEY')
+        try:
+            llm_provider = DeepSeekProvider(api_key=api_key)
+        except (ImportError, ValueError) as e:
+            print(f"Error initializing DeepSeek provider: {e}")
             print("Falling back to mock provider")
             llm_provider = MockLLMProvider()
     else:
